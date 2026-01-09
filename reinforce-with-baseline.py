@@ -4,6 +4,7 @@ from torch import nn
 
 class ReinforcePolicy(nn.Module):
     def __init__(self) -> None:
+        ''' Simply share model backbone between that actor & the critic. '''
         super().__init__()
         self.layers = nn.Sequential(
             nn.Linear(4, 32),
@@ -13,12 +14,10 @@ class ReinforcePolicy(nn.Module):
             nn.Linear(16, 3),
         )
 
-    def forward(self, state) -> dict[str, torch.Tensor]:
-        out = self.layers(state)
-        return {
-            'logits': out[:2],
-            'value':  out[2],
-        }
+    def forward(self, state):
+        dist = self.layers(state)
+        logits, value = dist[:2], dist[2]
+        return logits, value
 
 
 ''' Get some math for training. '''
@@ -34,16 +33,17 @@ def discounted_reward(gamma: float, rewards: list[float], t: int) -> float:
         g = gamma * g + r
     return g
 
-def trajectory(policy: nn.Module, env: gym.Env, *, gamma: float):
+def run_trajectory(policy: nn.Module, env: gym.Env, *, gamma: float):
     episode_over = False
     total_reward = 0
     observation, _ = env.reset()
     rewards = []
     logps = []
+    vs = []
     t = 0
     while not episode_over:
         observation /= np.array([4.8, 1, 0.418, 1])
-        logits, value = policy(torch.as_tensor(observation)).values()
+        logits, value = policy(torch.as_tensor(observation))
         dist = Categorical(logits=logits)
         action = dist.sample()
         observation, reward, terminated, truncated, _ = env.step(action.item())
@@ -52,30 +52,31 @@ def trajectory(policy: nn.Module, env: gym.Env, *, gamma: float):
         logp = dist.log_prob(action)
         logps.append(logp)
         rewards.append(float(reward))
+        vs.append(value)
         t += 1
     G = partial(discounted_reward, gamma, rewards)
     gs = torch.tensor([G(t) for t in range(t)])
-    gs = torch.nn.functional.layer_norm(gs, (t,))
+    vs = torch.hstack(vs)  # keep the grad
+    # As = torch.nn.functional.layer_norm(gs - vs, (t,))  # this will destroy training
     logps = torch.hstack(logps)
     gammas = torch.tensor([gamma ** i for i in range(t)])
-    l = (gs * gammas).dot(-logps)
-    return l, total_reward
+    loss = - (gammas * logps).dot(gs - vs) + 0.4 * nn.MSELoss()(gs, vs)  # policy reward & value estimator
+    return loss, total_reward
 
 
-def train(policy: nn.Module, env: gym.Env, *, lr = 0.002, epochs = 130, batches = 10, gamma = 0.99):
+def train(policy: nn.Module, env: gym.Env, *, lr = 0.003, epochs = 130, batches = 10, gamma = 0.99):
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
     for e in range(epochs):
         optimizer.zero_grad()
-        L = torch.tensor(0.)
-        tot_reward = 0.
+        batch_loss = torch.tensor(0.)
+        batch_reward = 0.
         for _ in range(batches):
-            l, r = trajectory(policy, env, gamma=gamma)
-            L += l
-            tot_reward += r
-        L /= batches
-        L.backward()
+            loss, reward = run_trajectory(policy, env, gamma=gamma)
+            batch_loss += loss; batch_reward += reward
+        batch_loss /= batches; batch_reward /= batches
+        print(f"epoch: {e}; tot-reward: {batch_reward}; loss: {batch_loss}")
+        batch_loss.backward()
         optimizer.step()
-        print(f"epoch: {e}; tot-reward: {tot_reward / batches}; loss: {L}")
     return policy
 
 policy = ReinforcePolicy()
@@ -86,5 +87,5 @@ env.close
 
 env = gym.make('CartPole-v1', render_mode='human')
 policy.eval()
-print(trajectory(policy, env, gamma=0.99))
+print(run_trajectory(policy, env, gamma=0.99))
 env.close

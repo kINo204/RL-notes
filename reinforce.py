@@ -54,24 +54,23 @@ def run_trajectory(policy: nn.Module, env: gym.Env, *, gamma: float):
     gs = torch.nn.functional.layer_norm(gs, (t,))
     logps = torch.hstack(logps)
     gammas = torch.tensor([gamma ** i for i in range(t)])
-    l = (gs * gammas).dot(-logps)
-    return l, total_reward
+    loss = - (gammas * logps).dot(gs)
+    return loss, total_reward
 
 
 def train(policy: nn.Module, env: gym.Env, *, lr = 0.002, epochs = 130, batches = 10, gamma = 0.99):
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
     for e in range(epochs):
         optimizer.zero_grad()
-        L = torch.tensor(0.)
-        tot_reward = 0.
+        batch_loss = torch.tensor(0.)
+        batch_reward = 0.
         for _ in range(batches):
-            l, r = run_trajectory(policy, env, gamma=gamma)
-            L += l
-            tot_reward += r
-        L /= batches
-        L.backward()
+            loss, reward = run_trajectory(policy, env, gamma=gamma)
+            batch_loss += loss; batch_reward += reward
+        batch_loss /= batches; batch_reward /= batches
+        print(f"epoch: {e}; tot-reward: {batch_reward}; loss: {batch_loss}")
+        batch_loss.backward()
         optimizer.step()
-        print(f"epoch: {e}; tot-reward: {tot_reward / batches}; loss: {L}")
     return policy
 
 policy = ReinforcePolicy()
